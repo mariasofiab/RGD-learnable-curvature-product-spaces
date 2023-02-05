@@ -120,6 +120,11 @@ class EuclideanModel(Manifold):
         super().__init__(dim = dim, ambientDim = dim, 
                          metricTensor = torch.ones(dim),
                          curvature = tn(0.))
+        
+    def inverseTensor(self, pts = None):
+        raw = 1 / self.metricTensor.clamp_min_(1e-6)
+        raws = raw.broadcast_to((len(pts), len(raw))) if not pts is None else raw
+        return raws
     
     def __str__(self):
         return 'E^{%d}'%self.dim
@@ -189,11 +194,11 @@ class PoincareModel(Manifold):
         dots = super(PoincareModel, self).g(pts, us, vs)
         norms = pts.norm(dim=1)
         lps = 2 / (1 - norms**2).clamp_min_(1e-12)
-        return dots*lps
+        return dots*lps**2
         
     def expMap(self, pts, vs):
         norms = torch.norm(vs, dim=1)
-        lps = 2 / (1 - norms**2).clamp_min_(1e-12)
+        lps = 2 / (1 - torch.norm(pts, dim=1)**2).clamp_min_(1e-12)
         vsNormal = (vs.T/norms).T
         s = sinh(lps * norms)
         c = cosh(lps * norms)
@@ -202,10 +207,10 @@ class PoincareModel(Manifold):
         return (pts.T*lps*(c + d * s)/den.clamp_min(1e-12)).T + (vsNormal.T*s/den.clamp_min(1e-12)).T
     
     def inverseTensor(self, pts):
-        raws = super(PoincareModel, self).inverseTensor(pts)
+        raws = super(PoincareModel, self).inverseTensor(pts) * (-1) # curvatura negativa!
         norms = pts.norm(dim=1)
         lps = 2 / (1 - norms**2).clamp_min_(1e-12)
-        return (raws.T/lps).T
+        return (raws.T/lps**2).T
         
     def distance(self, pts, qts):
         eps = 1e-12

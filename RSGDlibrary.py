@@ -5,7 +5,7 @@ import manifolds
 from tqdm import tqdm
 
 plot = 1 # 0 non plot, 1 plot only points, 2 plot also edges
-clipRange = .1 # torch.inf per non fare il clipping
+clipRange = tn(1.) # torch.inf per non fare il clipping
 epsCurv = tn(1e-6)
 '''
 X is tensor s.t. X[i,:] is the i° point and X[i, j] his j° coordinate.
@@ -18,8 +18,8 @@ def riemannianGrad(X: torch.Tensor, product: manifolds.Product):
     return M*gradient
 
 class RSGD(torch.optim.Optimizer):
-    def __init__(self, product : manifolds.Product, numPoints, lr = 1e-2):
-        X = product.randomPoints(n = numPoints)
+    def __init__(self, product : manifolds.Product, numPoints, lr = 1e-2, X = None):
+        if X is None: X = product.randomPoints(n = numPoints)
         K = [M.curvature for M in product.factors]
         params = [
                     {"params": [X], "lr": lr},
@@ -37,8 +37,7 @@ class RSGD(torch.optim.Optimizer):
             dX = riemannianGrad(X, self.product) # Riemannian Gradient
             dX = self.product.projection(X, dX) # Projection
             dX.clamp_(-clipRange, clipRange)# Clipping
-            dX.mul_(-lr) # Multiply for lr
-            newX = self.product.expMap(X, dX) # Exponential Map
+            newX = self.product.expMap(X, -lr*dX) # Exponential Map
             X.data.copy_(newX) # Update
         # Curvatures
         K = self.param_groups[1]["params"]
@@ -49,15 +48,9 @@ class RSGD(torch.optim.Optimizer):
             if k.grad is None:
                continue
             dk = k.grad.data
-            if dk.isnan():
-                print('Doh, un NaN')
             dk.clamp_(-clipRange, clipRange) # Clipping
-            if dk.isnan():
-                print('Doh, un NaN')
             dk.mul_(-lr)  # Multiply for lr
             newk = k.sign()*torch.max(epsCurv, torch.abs(k - dk)) # Distante epsCurv da 0
-            if newk.isnan():
-                print('Doh, un NaN')
             k.data.copy_(newk) # Update 
         
 def learning(opt, G, epochs, curvaturesDetach = False, no_curv = False, loss = 'default'):
