@@ -1,18 +1,3 @@
-'''
-Gestisce prodotti di manifold, dove un fattore è una manifold:
-    - A curvatura costante
-    - Con tensore metrico indotto da una matrice diagonale
-Sono stati già implementate le manifold
-    - Euclidea
-    - Sferica
-    - Iperbolica:
-        . Iperboloide (Modello di Lorentz) #Ora non funziona
-        . Disco (Modello di Poincaré)
-Nota: quando le variabili tensoriali si riferiscono a più punti (scorrevoli 
-      nella prima dimensione del tensore), tendo a chiamarle con la 's' alla
-      fine, in riferimento alla loro pluralità.
-      es: 'pt' è un punto, 'pts' sono più puntu
-'''
 import torch
 from torch import sqrt, cos, sin, cosh, sinh, arccos, tanh, atanh, arccosh, pi
 from torch import tensor as tn
@@ -24,31 +9,11 @@ def J(n):
     return J
 
 def quadratic(us,diagonals,vs):
-    '''
-    us, diagonals, vs sono tensori di dimensione n x d, dove n rappresenta il 
-    numero di punti.
-    il risultato res è uno scalare se n = 1, e coincide con (us)^T*M*vs
-    dove M è la matrice diagonale che ha diagonals come diagonale.
-    Altrimenti res è un vettore dove res[i] rappresenta (us[i,:]^T)*Mi*vs[i,:] 
-    dove Mi è la matrice diagonale che ha diagonals[i,:] come diagonale.
-    '''
     if len(us.size()) == 1:
         return us.dot(diagonals*vs)
     return torch.matmul(us,(diagonals*vs).T).diag() # Da ottimizzare nello spazio
 
 def tensorialDot(pts, qts):
-    '''
-    Parameters
-    ----------
-    pts : torch.tensor
-        dimension N x d
-    qts : torch.tensor
-        dimension N x d
-
-    Returns
-    -------
-    N dimensional tensor where res[i] = pts[i].dot(qts[i])
-    '''
     return quadratic(pts, torch.ones(pts.size()), qts)
 
 def lorentzDot(u, v):
@@ -61,7 +26,7 @@ def lorentzNorm(u):
 class Manifold():
     def __init__(self, dim : int, 
                  ambientDim : int, 
-                 metricTensor : 'diagonal of matrix of dimention of ambient Space', # Non è la vera diagonale! La dipendenza da curvatura e da p qui non è esposta
+                 metricTensor : 'diagonal of matrix of dimention of ambient Space', # Non e' la vera diagonale! La dipendenza da curvatura e da p qui non e' esposta
                  curvature : torch.tensor
                  ):
         self.dim = int(dim)
@@ -85,16 +50,6 @@ class Manifold():
         return hs - (pts.T*mul).T
     
     def inverseTensor(self, pts = None):
-        '''
-        il risultato raws è un trensore n x d dove
-                n = #punti
-                d = dimensione ambiente di self
-        Gestendo solo matrici diagonali, salviamo le informazioni della matrice
-        tenendone solo la diagonale.
-        La prima dimensione è n perché il tensore metrico dipende dal punto,
-        e per tensorializzare il codice passo un tensore pts di dimensione 
-        n x d dove p[i,:] rappresenta l'i° punto.
-        '''
         raw = self.curvature / self.metricTensor.clamp_min_(1e-6)
         raws = raw.broadcast_to((len(pts), len(raw))) if not pts is None else raw
         return raws
@@ -112,8 +67,8 @@ class Manifold():
     def points2plottable(self, points):
         n = len(points)
         if self.ambientDim == 1:
-            return torch.cat((points, torch.zeros(n, 1)), dim=1)
-        return points[:,:2]
+            return torch.cat((points, torch.zeros(n, 1)), dim=1).detach()
+        return points[:,:2].detach()
     
 class EuclideanModel(Manifold):
     def __init__(self, dim):
@@ -138,7 +93,9 @@ class SphericModel(Manifold):
 
     def expMap(self, pts, vs):
         norms = torch.norm(vs, dim=1)
-        return (pts.T*cos(norms)).T + (vs.T*sin(norms)/norms.clamp_min(1e-12)).T
+        res = (pts.T*cos(norms)).T + (vs.T*sin(norms)/norms.clamp_min(1e-12)).T
+        res = (res.T/res.norm(dim=1)).T # Stabilit�!
+        return res
         
     def distance(self, pts, qts):
         eps = 1e-12
@@ -204,7 +161,10 @@ class PoincareModel(Manifold):
         c = cosh(lps * norms)
         d = tensorialDot(pts, vsNormal)
         den = 1 + (lps - 1) * c + lps * d * s
-        return (pts.T*lps*(c + d * s)/den.clamp_min(1e-12)).T + (vsNormal.T*s/den.clamp_min(1e-12)).T
+        res = (pts.T*lps*(c + d * s)/den.clamp_min(1e-12)).T + (vsNormal.T*s/den.clamp_min(1e-12)).T
+        eps = 1e-3
+        res = (res.T/((1+eps)*res.norm(dim=1)/res.norm(dim=1).clamp_max(1)-eps)).T # Stabilit�
+        return res
     
     def inverseTensor(self, pts):
         raws = super(PoincareModel, self).inverseTensor(pts) * (-1) # curvatura negativa!
@@ -235,7 +195,7 @@ class PoincareModel(Manifold):
         return 'D^{%d}_{%.1f}'%(self.dim, self.curvature.data)
     
 class Product():
-    def __init__(self, factors : 'list of ManifoldConstantCurvature'):
+    def __init__(self, factors : 'list of Manifold'):
         self.factors = factors
         self.dim = sum([manifold.dim for manifold in factors])
         self.ambientDim = sum([manifold.ambientDim for manifold in factors])
@@ -282,13 +242,6 @@ class Product():
         return columns
     
     def inverseTensor(self, pts, u = None, v = None):
-        '''
-        Il risultato columns è un tensore n x d dove:
-                n = #punti
-                d = dimensione ambiente di self
-        columns[i,:] è la diagonale della matrice d x d che matematicamente
-        dovrebbe portare il nome di 'matrice che definisce il tensore metrico'.
-        '''
         i = self.factors[0].ambientDim
         columns = self.factors[0].inverseTensor(pts[:,:i])
         for count, manifold in enumerate(self.factors):
@@ -322,7 +275,7 @@ class Product():
             txt += ' x ' + str(self.factors[i])
         return txt
     
-def plot(X, P, G = None):
+def plotOnProduct(X, P, G = None):
     N = len(X)
     colours = list(mcolors.TABLEAU_COLORS)
     plottablePoints = []; i = 0;
@@ -353,5 +306,3 @@ def plot(X, P, G = None):
     plt.plot(x, y, '-k', linewidth=1.)
     plt.legend()
     plt.show()
-
-# Avevo scordato il quadrato in lp, forse era per questo che non funzionava qualcosa

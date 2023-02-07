@@ -1,35 +1,35 @@
 import torch
 from torch import tensor as tn
 from torch import sqrt, cos, sin, cosh, sinh, arccos, tanh, atanh, arccosh, pi
-import manifolds
 from tqdm import tqdm
-
-plot = 1 # 0 non plot, 1 plot only points, 2 plot also edges
+from manifolds import *
+plotOption = 0 # 0 non plot, 1 plot only points, 2 plot also edges
 clipRange = tn(1.) # torch.inf per non fare il clipping
 epsCurv = tn(1e-6)
+beta = tn(.5) # Per il momento
 '''
 X is tensor s.t. X[i,:] is the i° point and X[i, j] his j° coordinate.
 K is a list of 1-tensors and K[i] is the magnitude of curvature of i° manifold.
 '''
 
-def riemannianGrad(X: torch.Tensor, product: manifolds.Product):   
+def riemannianGrad(X: torch.Tensor, product: Product):   
     gradient = X.grad.data
     M = product.inverseTensor(X)
     return M*gradient
 
 class RSGD(torch.optim.Optimizer):
-    def __init__(self, product : manifolds.Product, numPoints, lr = 1e-2, X = None):
+    def __init__(self, product : Product, numPoints, lr = 1e-2, X = None):
         if X is None: X = product.randomPoints(n = numPoints)
         K = [M.curvature for M in product.factors]
         params = [
                     {"params": [X], "lr": lr},
-                    {"params": K, "lr": lr}
+                    {"params": K, "lr": 1e-2}
                  ]
         super(RSGD, self).__init__(params, {})
         self.product= product
 
-    def step(self):
-        global clipRange, epsCurv
+    def step(self, dXold = None, dKold = None):
+        global clipRange, epsCurv, beta
         # Points
         X = self.param_groups[0]["params"][0]
         lr = self.param_groups[0]["lr"]
@@ -37,62 +37,89 @@ class RSGD(torch.optim.Optimizer):
             dX = riemannianGrad(X, self.product) # Riemannian Gradient
             dX = self.product.projection(X, dX) # Projection
             dX.clamp_(-clipRange, clipRange)# Clipping
+            if not dXold is None:
+                dX = beta * dXold + (1 - beta) * dX # Momento
+                dXold = dX
             newX = self.product.expMap(X, -lr*dX) # Exponential Map
             X.data.copy_(newX) # Update
         # Curvatures
         K = self.param_groups[1]["params"]
         # Non occorre tensorializzare, tanto tipicamente sono poche componenti
-        lr = self.param_groups[0]["lr"]
+        lr = self.param_groups[1]["lr"]
         for i in range(len(K)):
             k = K[i]
             if k.grad is None:
                continue
             dk = k.grad.data
             dk.clamp_(-clipRange, clipRange) # Clipping
-            dk.mul_(-lr)  # Multiply for lr
-            newk = k.sign()*torch.max(epsCurv, torch.abs(k - dk)) # Distante epsCurv da 0
+            if not dKold is None: 
+                dk = beta * dKold[i] + (1 - beta) * dk # Momento
+                dKold[i] = dk
+            newk = k.sign()*torch.max(epsCurv, torch.abs(k - lr * dk)) # Distante epsCurv da 0
             k.data.copy_(newk) # Update 
         
-def learning(opt, G, epochs, curvaturesDetach = False, no_curv = False, loss = 'default'):
+def learning(opt, G, epochs, curvaturesDetach = False, loss = 'default',
+             no_curv = False, momento = True):
+    printIncipit(opt, len(G), epochs, no_curv, momento)
     if loss == 'default': loss = defaultLoss
     losses = []; 
     X = opt.param_groups[0]["params"][0]
     K = opt.param_groups[1]["params"]
-    if plot == 1: manifolds.plot(X, opt.product) 
-    elif plot == 2: manifolds.plot(X, opt.product, G = G)
+    if plotOption == 1: plotOnProduct(X, opt.product) 
+    elif plotOption == 2: plotOnProduct(X, opt.product, G = G)
+    Ks = [[float(k) for k in K]]
+    if momento: 
+        dX = torch.zeros(X.size(), dtype = torch.float64)
+        dK = [tn(0., dtype = torch.float64) for k in K]
+    else:
+        dX = None; dK = None
     for epoch in tqdm(range(epochs)):
         opt.zero_grad()
-        l = loss(X, G, opt.product); losses.append(l.data)
+        l = loss(X, G, opt.product); losses.append(float(l.data))
         if no_curv:
             l.backward(inputs = [X])
         else:
             l.backward(inputs = [X] + K)
-        opt.step()
-        if plot == 1: manifolds.plot(X, opt.product) 
-        elif plot == 2: manifolds.plot(X, opt.product, G = G)
-    return X, K, losses
+        opt.step(dX, dK)
+        Ks.append([float(k) for k in K])
+        if plotOption == 1: plotOnProduct(X, opt.product) 
+        elif plotOption == 2: plotOnProduct(X, opt.product, G = G)
+    losses.append(float(loss(X, G, opt.product).data))
+    return X, K, losses, Ks
 
 def defaultLoss(X : 'tensor of points in P', 
                 G : 'matrix of distances', 
                 P : 'product manifold'):
-    '''
-    Ora è un solo for! 
-    Non ho avuto un'idea buona per eliminare ange questo. L'idea è stata di 
-    creare un 3-tensore di cui una buona metà degli elementi sono zero.
-    In qualche modo credo che si possa fare, ma se il nostro problema è di
-    spazio prima che di tempo, mi sembra una scelta cattiva.
-    '''
     N = len(X); l = 0; addendi = 0;
     for i in range(1,N): # Se dovessi aggiungere i minibatch li farei su questo for
         diP = P.distance(X[i,:].broadcast_to(X[:i, :].size()), X[:i, :])
         l += torch.sum(((diP / G[i,:i])**2 - 1)**2)
         addendi += len(diP)
     return l / addendi
-                       
-'''To do:
-1   dimezzo il lr quando la loss cresce
-2   aggiungo batch
-3   aggiungo momento    
-4   tensorializza la loss! Fatto a metà
-5   ottieni una loss che almeno diminuisca (se, magariii)
+
+def everageDistortion(X, P, G):
+    N = len(X); res = 0
+    for i in range(N):
+        diP = P.distance(X[i,:].broadcast_to(X[:i, :].size()), X[:i, :])
+        res += sum(abs(G[i,:i] - diP)/G[i,:i].clamp_min(1e-9))
+    return 2 * res / (N**2 - N)
+
+def printIncipit(opt, N, epochs, no_curv, momento):
+    global clipRange, epsCurv, beta
+    print('SETTINGS:')
+    print('\tEpochs:          %d'%epochs)
+    print('\tX lr:            %E'%opt.param_groups[0]["lr"])
+    print('\tK lr:            %E'%opt.param_groups[1]["lr"])
+    print('\t#Points:         %d'%N)
+    print('\tMomento:         %s'%str(momento))
+    if momento: print('\tBeta:            %f'%beta)
+    print('\tClipping:        %s'%str(clipRange != torch.inf))
+    if clipRange != torch.inf: print('\tClip threshold:  %f'%clipRange)
+    print('\tNo_curv:         %s'%str(no_curv))
+
+'''
+TO DO:
+1.  Momento                                                                   V
+2.  Salva
+3.  Grafica le curvature nelle epochs                                         V
 '''
