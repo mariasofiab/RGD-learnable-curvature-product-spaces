@@ -4,10 +4,6 @@ from torch import tensor as tn
 from matplotlib import pyplot as plt
 import matplotlib.colors as mcolors
 
-def J(n):
-    J = torch.eye(n); J[0,0] = -1
-    return J
-
 def quadratic(us,diagonals,vs):
     if len(us.size()) == 1:
         return us.dot(diagonals*vs)
@@ -15,10 +11,6 @@ def quadratic(us,diagonals,vs):
 
 def tensorialDot(pts, qts):
     return quadratic(pts, torch.ones(pts.size()), qts)
-
-def lorentzDot(u, v):
-    d = len(u)
-    return quadratic(u,J(d),v)
 
 def lorentzNorm(u):
     return sqrt(lorentzDot(u,u))
@@ -42,7 +34,10 @@ class Manifold():
         return sqrt(self.g(pts, us, us))
     
     def distance(self, pts, qts):
-        return (pts-qts).norm(dim=1)
+        res = (pts-qts).norm(dim=1)
+        if res.isnan().any():
+            print('Doh, un NaN!')
+        return res
     
     def projection(self, pts : 'tensor of points in M as raws', hs : 'in Ambient Space'):
         if self.dim == self.ambientDim: return hs
@@ -58,7 +53,10 @@ class Manifold():
         return torch.rand(n,self.ambientDim, dtype=torch.float64)-.5
     
     def expMap(self, pts, vs):
-        return pts + vs
+        res = pts + vs
+        if res.isnan().any():
+            print('Doh, un NaN!')
+        return res
         
     def __contains__(self, x : torch.tensor):
         if len(x) != self.ambientDim: return False
@@ -71,7 +69,7 @@ class Manifold():
         return points[:,:2].detach()
     
 class EuclideanModel(Manifold):
-    def __init__(self, dim):
+    def __init__(self, dim, curvature = 0):
         super().__init__(dim = dim, ambientDim = dim, 
                          metricTensor = torch.ones(dim),
                          curvature = tn(0.))
@@ -94,12 +92,17 @@ class SphericModel(Manifold):
     def expMap(self, pts, vs):
         norms = torch.norm(vs, dim=1)
         res = (pts.T*cos(norms)).T + (vs.T*sin(norms)/norms.clamp_min(1e-12)).T
-        res = (res.T/res.norm(dim=1)).T # Stabilit�!
+        res = (res.T/res.norm(dim=1)).T # Stabilita'!
+        if res.isnan().any():
+            print('Doh, un NaN!')
         return res
         
     def distance(self, pts, qts):
-        eps = 1e-12
-        return arccos(tensorialDot(pts, qts).clamp(-1+eps,1-eps)) / sqrt(self.curvature).clamp_min(eps)
+        eps = 1e-9
+        res = arccos(tensorialDot(pts, qts).clamp(-1+eps,1-eps)) / sqrt(self.curvature).clamp_min(eps)
+        if res.isnan().any():
+            print('Doh, un NaN!')
+        return res
         
     def randomPoints(self, n = 1):
         pts = super(SphericModel, self).randomPoints(n)
@@ -112,33 +115,6 @@ class SphericModel(Manifold):
     
     def __str__(self):
         return 'S^{%d}_{%.1f}'%(self.dim, self.curvature.data)
-        
-class LorentzModel(Manifold): # da omologare la tensorializzazione (o da cancellare direttamente)
-    def __init__(self, dim, curvature):
-        curvature = -abs(tn(curvature, dtype = torch.float64, requires_grad = True))
-        super().__init__(dim = dim, ambientDim = dim+1, 
-                         metricTensor = J(dim+1),
-                         curvature = curvature)
-            
-    def expMap(self, p, v):
-        res = cosh(lorentzNorm(v))*p + sin(lorentzNorm(v))  * v / lorentzNorm(v)
-        return res
-        
-    def distance(self, p, q):
-        return arccosh(-self.g(p, p, q).clamp_min(1+1e-12)) / sqrt(self.curvature).clamp_min(1e-15)
-        
-    def randomPoints(self, n = 1):
-        res = [(torch.rand(self.ambientDim, dtype = torch.float64)-.5)*4 for i in range(n)]
-        for x in res:
-            x = sqrt(1 + x[1:].norm()**2)
-        return res
-    
-    def __contains__(self, x : torch.tensor):
-        if len(x) != self.ambientDim: return False
-        return abs(lorentzNorm(x) + 1) < 1e-6
-    
-    def __str__(self):
-        return 'H^{%d}_{%.1f}'%(self.dim, self.curvature.data)
         
 class PoincareModel(Manifold):
     def __init__(self, dim, curvature):
@@ -157,13 +133,15 @@ class PoincareModel(Manifold):
         norms = torch.norm(vs, dim=1)
         lps = 2 / (1 - torch.norm(pts, dim=1)**2).clamp_min_(1e-12)
         vsNormal = (vs.T/norms).T
-        s = sinh(lps * norms)
-        c = cosh(lps * norms)
+        s = sinh((lps * norms).clamp_max(85)) # clamp per stabilità
+        c = cosh((lps * norms).clamp_max(85)) # clamp per stabilità
         d = tensorialDot(pts, vsNormal)
         den = 1 + (lps - 1) * c + lps * d * s
         res = (pts.T*lps*(c + d * s)/den.clamp_min(1e-12)).T + (vsNormal.T*s/den.clamp_min(1e-12)).T
         eps = 1e-3
-        res = (res.T/((1+eps)*res.norm(dim=1)/res.norm(dim=1).clamp_max(1)-eps)).T # Stabilit�
+        res = (res.T/((1+eps)*res.norm(dim=1)/res.norm(dim=1).clamp_max(1)-eps)).T # Stabilita'
+        if res.isnan().any():
+            print('Doh, un NaN!')
         return res
     
     def inverseTensor(self, pts):
@@ -173,18 +151,20 @@ class PoincareModel(Manifold):
         return (raws.T/lps**2).T
         
     def distance(self, pts, qts):
-        eps = 1e-12
+        eps = 1e-9
         pqs = super(PoincareModel, self).distance(pts, qts) ** 2
-        pps = tensorialDot(pts, pts)
-        qqs = tensorialDot(qts, qts)
+        pps = tensorialDot(pts, pts).clamp_min(eps)
+        qqs = tensorialDot(qts, qts).clamp_min(eps)
         arg = 1 + 2 * pqs / ((1-pps)*(1-qqs))
-        #arg = 1 + 2 * ((p-q).dot(p-q)) / ((1-p.dot(p))*(1 - q.dot(q)))
-        return arccosh(arg.clamp_min(1 + eps)) / sqrt(-self.curvature).clamp_min(eps)
+        res = arccosh(arg.clamp_min(1 + eps)) / sqrt(-self.curvature).clamp_min(eps)
+        if res.isnan().any():
+            print('Doh, un NaN!')
+        return res
         
     def randomPoints(self, n = 1):
         pts = super(PoincareModel, self).randomPoints(n)
         pts = (pts.T/torch.norm(pts, dim=1)).T
-        pts = (pts.T*torch.rand(n)*.9).T
+        pts = (pts.T*torch.rand(n)*.99).T
         return pts
     
     def __contains__(self, x : torch.tensor):
@@ -199,6 +179,9 @@ class Product():
         self.factors = factors
         self.dim = sum([manifold.dim for manifold in factors])
         self.ambientDim = sum([manifold.ambientDim for manifold in factors])
+    
+    def getCurvatures(self):
+        return [M.curvature for M in self.factors]
         
     def g(self, pts, us, vs):
         i = self.factors[0].ambientDim
@@ -218,7 +201,7 @@ class Product():
             i = j
         return True
     
-    def distance(self, pts, qts): # Tensorizza
+    def distance(self, pts, qts):
         if len(pts.size())==1:
             pts = pts.broadcast_to((1,len(pts)))
             qts = qts.broadcast_to((1,len(qts)))
@@ -239,6 +222,8 @@ class Product():
                 j = i + manifold.ambientDim
                 columns = torch.cat((columns, manifold.expMap(pts[:,i:j], vs[:,i:j])), dim=1)
                 i = j
+        if columns.isnan().any():
+            print('Doh, un NaN!')
         return columns
     
     def inverseTensor(self, pts, u = None, v = None):
