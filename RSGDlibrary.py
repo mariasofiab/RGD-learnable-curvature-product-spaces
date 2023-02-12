@@ -115,7 +115,8 @@ def learning(opt, G, epochs, curvaturesDetach = False, loss = 'default',
         fig, ax = plt.subplots()
         for j in range(len(opt.product.factors)):
             fact = opt.product.factors[j]
-            ax.plot([curvs[i][j] for i in range(len(curvs))], label='$'+str(fact)+'$')
+            if not type(fact) is EuclideanModel:
+                ax.plot([curvs[i][j] for i in range(len(curvs))], label='$'+str(fact)+'$')
         ax.set_title('Curvature nelle Epoch')
         plt.legend(); plt.show()
     return X, opt.product, devg

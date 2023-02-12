@@ -12,9 +12,6 @@ def quadratic(us,diagonals,vs):
 def tensorialDot(pts, qts):
     return quadratic(pts, torch.ones(pts.size()), qts)
 
-def lorentzNorm(u):
-    return sqrt(lorentzDot(u,u))
-
 class Manifold():
     def __init__(self, dim : int, 
                  ambientDim : int, 
@@ -181,7 +178,11 @@ class Product():
         self.ambientDim = sum([manifold.ambientDim for manifold in factors])
     
     def getCurvatures(self):
-        return [M.curvature for M in self.factors]
+        res = []
+        for M in self.factors:
+            if not type(M) is EuclideanModel:
+                res.append(M.curvature)
+        return res
         
     def g(self, pts, us, vs):
         i = self.factors[0].ambientDim
