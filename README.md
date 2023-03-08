@@ -1,3 +1,4 @@
-# Tesi_Robin
+#Riemannian Gradient Descent on learnable curvature product spaces
 
-Ciao robin, qui caricheremo i file della tua tesi, poi mettiamo una bella descrizione!
+
+
