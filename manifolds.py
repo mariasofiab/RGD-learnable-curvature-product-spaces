@@ -3,14 +3,23 @@ from torch import sqrt, cos, sin, cosh, sinh, arccos, tanh, atanh, arccosh, pi
 from torch import tensor as tn
 from matplotlib import pyplot as plt
 import matplotlib.colors as mcolors
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("GPU is available")
+else:
+    device = torch.device("cpu")
+    print("GPU not available, using CPU instead")
+    
+# def quadratic(us,diagonals,vs):
+#     if len(us.size()) == 1:
+#         return us.dot(diagonals*vs)
+#     return torch.matmul(us,(diagonals*vs).T).diag() # Da ottimizzare nello spazio
 
 def quadratic(us,diagonals,vs):
-    if len(us.size()) == 1:
-        return us.dot(diagonals*vs)
-    return torch.matmul(us,(diagonals*vs).T).diag() # Da ottimizzare nello spazio
+    return torch.sum(us*diagonals*vs, dim=1)
 
 def tensorialDot(pts, qts):
-    return quadratic(pts, torch.ones(pts.size()), qts)
+    return quadratic(pts, torch.ones(pts.size(), device = device), qts)
 
 class Manifold():
     def __init__(self, dim : int, 
@@ -21,7 +30,7 @@ class Manifold():
         self.dim = int(dim)
         self.ambientDim = int(ambientDim)
         self.metricTensor = metricTensor # matrix of dimention of ambient Space
-        self.curvature = tn(float(curvature), dtype = torch.float64, requires_grad = True)
+        self.curvature = tn(float(curvature), dtype = torch.float64, requires_grad = True, device = device)
         
     def g(self, pts : "in M", us : "in TpM", vs : "in TpM"):
         raws = self.metricTensor.broadcast_to((len(pts), self.ambientDim)) / self.curvature
@@ -32,8 +41,6 @@ class Manifold():
     
     def distance(self, pts, qts):
         res = (pts-qts).norm(dim=1)
-        if res.isnan().any():
-            print('Doh, un NaN!')
         return res
     
     def projection(self, pts : 'tensor of points in M as raws', hs : 'in Ambient Space'):
@@ -47,13 +54,27 @@ class Manifold():
         return raws
     
     def randomPoints(self, n = 1):
-        return torch.rand(n,self.ambientDim, dtype=torch.float64)-.5
+        return torch.rand(n,self.ambientDim, dtype=torch.float64, device = device)-.5
     
     def expMap(self, pts, vs):
         res = pts + vs
-        if res.isnan().any():
-            print('Doh, un NaN!')
         return res
+    
+    def averageDistances(self, pts):
+        num = 0; den = 0;
+        N = len(pts)
+        for i in range(1, N):
+            num += sum(self.distance(pts[i,:].broadcast_to(pts[:i, :].size()), pts[:i, :])).detach()
+            den += i
+        return num / den
+    
+    def averageSquaredDistances(self, pts):
+        num = 0; den = 0;
+        N = len(pts)
+        for i in range(1, N):
+            num += sum(self.distance(pts[i,:].broadcast_to(pts[:i, :].size()), pts[:i, :])**2)
+            den += i
+        return num / den
         
     def __contains__(self, x : torch.tensor):
         if len(x) != self.ambientDim: return False
@@ -62,14 +83,14 @@ class Manifold():
     def points2plottable(self, points):
         n = len(points)
         if self.ambientDim == 1:
-            return torch.cat((points, torch.zeros(n, 1)), dim=1).detach()
+            return torch.cat((points, torch.zeros(n, 1, device = device)), dim=1).detach()
         return points[:,:2].detach()
     
 class EuclideanModel(Manifold):
     def __init__(self, dim, curvature = 0):
         super().__init__(dim = dim, ambientDim = dim, 
-                         metricTensor = torch.ones(dim),
-                         curvature = tn(0.))
+                         metricTensor = torch.ones(dim, device = device),
+                         curvature = tn(0., device = device))
         
     def inverseTensor(self, pts = None):
         raw = 1 / self.metricTensor.clamp_min_(1e-6)
@@ -81,24 +102,21 @@ class EuclideanModel(Manifold):
     
 class SphericModel(Manifold):
     def __init__(self, dim, curvature):
-        curvature = abs(tn(curvature, dtype = torch.float64, requires_grad = True))
+        curvature = abs(tn(curvature, dtype = torch.float64, requires_grad = True, device = device))
         super().__init__(dim = dim, ambientDim = dim+1, 
-                         metricTensor = torch.ones(dim+1),
+                         metricTensor = torch.ones(dim+1, device = device),
                          curvature = curvature)
 
     def expMap(self, pts, vs):
         norms = torch.norm(vs, dim=1)
         res = (pts.T*cos(norms)).T + (vs.T*sin(norms)/norms.clamp_min(1e-12)).T
         res = (res.T/res.norm(dim=1)).T # Stabilita'!
-        if res.isnan().any():
-            print('Doh, un NaN!')
         return res
         
     def distance(self, pts, qts):
         eps = 1e-9
         res = arccos(tensorialDot(pts, qts).clamp(-1+eps,1-eps)) / sqrt(self.curvature).clamp_min(eps)
-        if res.isnan().any():
-            print('Doh, un NaN!')
+
         return res
         
     def randomPoints(self, n = 1):
@@ -115,9 +133,9 @@ class SphericModel(Manifold):
         
 class PoincareModel(Manifold):
     def __init__(self, dim, curvature):
-        curvature = -abs(tn(curvature, dtype = torch.float64, requires_grad = True))
+        curvature = -abs(tn(curvature, dtype = torch.float64, requires_grad = True, device = device))
         super().__init__(dim = dim, ambientDim = dim,
-                         metricTensor = torch.ones(dim),
+                         metricTensor = torch.ones(dim, device = device),
                          curvature = curvature)
         
     def g(self, pts, us, vs):
@@ -136,9 +154,10 @@ class PoincareModel(Manifold):
         den = 1 + (lps - 1) * c + lps * d * s
         res = (pts.T*lps*(c + d * s)/den.clamp_min(1e-12)).T + (vsNormal.T*s/den.clamp_min(1e-12)).T
         eps = 1e-3
-        res = (res.T/((1+eps)*res.norm(dim=1)/res.norm(dim=1).clamp_max(1)-eps)).T # Stabilita'
-        if res.isnan().any():
-            print('Doh, un NaN!')
+        res -= (res.T*((1 + (1-eps)/(res.norm(dim=1).clamp_min(eps)))*((res.norm(dim=1) >= 1 - eps)*1))).T
+        #res = (res.T/((1+eps)*res.norm(dim=1)/res.norm(dim=1).clamp_max(1)-eps)).T # Stabilita'
+        if (res.norm(dim=1) == 1).any():
+            print('ho sgravato')
         return res
     
     def inverseTensor(self, pts):
@@ -154,14 +173,22 @@ class PoincareModel(Manifold):
         qqs = tensorialDot(qts, qts).clamp_min(eps)
         arg = 1 + 2 * pqs / ((1-pps)*(1-qqs))
         res = arccosh(arg.clamp_min(1 + eps)) / sqrt(-self.curvature).clamp_min(eps)
-        if res.isnan().any():
-            print('Doh, un NaN!')
+
         return res
         
+    def distance(self, pts, qts):
+        eps = 1e-9
+        pqs = super(PoincareModel, self).distance(pts, qts) ** 2
+        pps = tensorialDot(pts, pts).clamp_min(eps)
+        qqs = tensorialDot(qts, qts).clamp_min(eps)
+        arg = 1 + 2 * pqs / ((1-pps)*(1-qqs))
+        res = arccosh(arg.clamp_min(1 + eps)) / sqrt(-self.curvature).clamp_min(eps)
+        return res
+    
     def randomPoints(self, n = 1):
         pts = super(PoincareModel, self).randomPoints(n)
         pts = (pts.T/torch.norm(pts, dim=1)).T
-        pts = (pts.T*torch.rand(n)*.99).T
+        pts = (pts.T*torch.rand(n, device = device)*.99).T
         return pts
     
     def __contains__(self, x : torch.tensor):
@@ -223,8 +250,6 @@ class Product():
                 j = i + manifold.ambientDim
                 columns = torch.cat((columns, manifold.expMap(pts[:,i:j], vs[:,i:j])), dim=1)
                 i = j
-        if columns.isnan().any():
-            print('Doh, un NaN!')
         return columns
     
     def inverseTensor(self, pts, u = None, v = None):
@@ -246,6 +271,14 @@ class Product():
                 columns = torch.cat((columns, manifold.projection(p[:,i:j], h[:,i:j])), dim=1)
                 i = j
         return columns
+    
+    def projOnFactor(self, pts, i):
+        '''
+        Proietta i punti sul fattore i°
+        '''
+        dim = self.factors[i].ambientDim
+        sx = sum([self.factors[j].ambientDim for j in range(i)])
+        return pts[:,sx:sx+dim]
             
     def randomPoints(self, n = 1):
         X = self.factors[0].randomPoints(n)
@@ -255,13 +288,25 @@ class Product():
         X.requires_grad_(True)
         return X
     
+    def repartitionOfDistances(self, pts, squared = False):
+        facts = len(self.factors)
+        percentages = torch.zeros(facts)
+        for i in range(facts):
+            M = self.factors[i]
+            if squared:
+                percentages[i] = M.averageSquaredDistances(self.projOnFactor(pts, i))
+            else:
+                percentages[i] = M.averageDistances(self.projOnFactor(pts, i))
+        percentages = percentages * 100 /sum(percentages)
+        return percentages
+        
     def __str__(self):
         txt = str(self.factors[0])
         for i in range(1, len(self.factors)):
             txt += ' x ' + str(self.factors[i])
         return txt
     
-def plotOnProduct(X, P, G = None):
+def plotOnProduct(X, P, G = None, comment = '', savePlt = False, saveName = ''):
     N = len(X)
     colours = list(mcolors.TABLEAU_COLORS)
     plottablePoints = []; i = 0;
@@ -273,7 +318,7 @@ def plotOnProduct(X, P, G = None):
     # Plot edges
     if not G is None:
         vMax = G.max()
-        vMin = (G+vMax*torch.eye(len(G))).min()
+        vMin = (G+vMax*torch.eye(len(G), device = device)).min()
         deltaG = vMax-vMin
         for count, other in enumerate(plottablePoints): #Scorro sui fattori, non sui punti
             pts, _ = other
@@ -286,9 +331,11 @@ def plotOnProduct(X, P, G = None):
     for pts, label in plottablePoints:
         plt.scatter(pts.data[:,0], pts.data[:,1], label = label)
     # Plot Circle
-    theta = torch.linspace(0, 2*pi, 100)
+    theta = torch.linspace(0, 2*pi, 100, device = device)
     x = torch.cos(theta)
     y = torch.sin(theta)
     plt.plot(x, y, '-k', linewidth=1.)
     plt.legend()
+    plt.title(comment)
+    if savePlt: plt.savefig('Immagini/'+saveName+'Embedding.png',dpi=600)
     plt.show()
